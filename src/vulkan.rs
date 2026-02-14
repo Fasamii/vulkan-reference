@@ -27,7 +27,7 @@ impl Context {
         let surface = Surface::new(&instance, window).expect("Surface Error");
         let device = Device::new(&instance, &surface).expect("Device Error");
         let swapchain =
-            Swapchain::new(&instance, &device, &surface, window).expect("Swapchain Error");
+            Swapchain::new(&instance, &device, &surface, window, None).expect("Swapchain Error");
 
         Self {
             instance,
@@ -35,6 +35,24 @@ impl Context {
             device,
             swapchain,
         }
+    }
+
+    pub fn recreate_swapchain(
+        &mut self,
+        window: &winit::window::Window,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let new_swapchain = Swapchain::new(
+            &self.instance,
+            &self.device,
+            &self.surface,
+            window,
+            Some(self.swapchain.swapchain),
+        )
+        .expect("Swapchain Recreation Error");
+
+        self.swapchain = new_swapchain;
+
+        Ok(())
     }
 }
 
@@ -294,8 +312,7 @@ pub struct Swapchain {
     pub image_views: Vec<vk::ImageView>,
     pub format: vk::SurfaceFormatKHR,
     pub extent: vk::Extent2D,
-    device: ash::Device, // Store device for cleanup // TODO: Think if storing device without any
-                         // wrapper like Rc or Arc is good idea
+    device: ash::Device, // Device is only 48 bytes wrapper (safe to clone if cleanup done correctly)
 }
 
 impl Drop for Swapchain {
@@ -315,6 +332,7 @@ impl Swapchain {
         device: &Device,
         surface: &Surface,
         window: &winit::window::Window,
+        old_swapchain: Option<vk::SwapchainKHR>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let surface_capabilities = unsafe {
             surface
@@ -375,31 +393,33 @@ impl Swapchain {
             }
         };
 
-        // TODO: Make that cleaner
-        let image_count = surface_capabilities.min_image_count + 1;
-        let image_count = if surface_capabilities.max_image_count > 0 {
-            image_count.min(surface_capabilities.max_image_count)
-        } else {
-            image_count
-        };
+        let image_count = (surface_capabilities.min_image_count + 1).min(
+            if surface_capabilities.max_image_count > 0 {
+                surface_capabilities.max_image_count
+            } else {
+                u32::MAX
+            },
+        );
 
-        // let (image_sharing_mode, queue_family_index_count, p_queue_family_indices) =
-        //     if device.graphics_queue_family_idx != device.present_queue_family_idx {
-        //         (
-        //             vk::SharingMode::CONCURRENT,
-        //             2,
-        //             queue_family_indices.as_ptr(),
-        //         )
-        //     } else {
-        //         (vk::SharingMode::EXCLUSIVE, 0, std::ptr::null())
-        //     };
+        // let queue_family_indices = &[
+        //     device.graphics_queue_family_idx,
+        //     device.present_queue_family_idx,
+        // ];
 
-        let queue_family_indices = &[
-            device.graphics_queue_family_idx,
-            device.present_queue_family_idx,
-        ];
+        let (image_sharing_mode, queue_family_indices) =
+            if device.graphics_queue_family_idx == device.present_queue_family_idx {
+                (vk::SharingMode::EXCLUSIVE, vec![])
+            } else {
+                (
+                    vk::SharingMode::CONCURRENT,
+                    vec![
+                        device.graphics_queue_family_idx,
+                        device.present_queue_family_idx,
+                    ],
+                )
+            };
 
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.surface)
             .min_image_count(image_count)
             .image_format(format.format)
@@ -407,13 +427,20 @@ impl Swapchain {
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            // Less performance but simpler
-            .image_sharing_mode(vk::SharingMode::CONCURRENT)
-            .queue_family_indices(queue_family_indices)
+            .image_sharing_mode(image_sharing_mode)
             .pre_transform(surface_capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
             .clipped(true);
+
+        if image_sharing_mode == vk::SharingMode::CONCURRENT {
+            swapchain_create_info =
+                swapchain_create_info.queue_family_indices(&queue_family_indices);
+        }
+
+        if let Some(old_swapchain) = old_swapchain {
+            swapchain_create_info = swapchain_create_info.old_swapchain(old_swapchain);
+        }
 
         let loader = khr::swapchain::Device::new(&instance.instance, &device.device);
         let swapchain = unsafe { loader.create_swapchain(&swapchain_create_info, None)? };
@@ -461,5 +488,12 @@ impl Swapchain {
             extent,
             device: device.device.clone(),
         })
+    }
+
+    fn recreate(self, window: &winit::window::Window) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for all GPU operations to complete before destroying resources
+        unsafe { self.device.device_wait_idle() };
+
+        todo!()
     }
 }

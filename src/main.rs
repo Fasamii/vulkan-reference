@@ -77,14 +77,17 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                println!("Redraw - requirested");
+                // println!("Redraw - requirested");
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
             WindowEvent::Resized(_new_size) => {
-                // Handle window resize - recreate swapchain
-                println!("Window resized - need to recreate swapchain");
+                if let (Some(context), Some(window)) = (&mut self.context, &self.window) {
+                    context
+                        .recreate_swapchain(window)
+                        .expect("Failed to crecreate swapchain")
+                }
             }
             _ => {}
         }
