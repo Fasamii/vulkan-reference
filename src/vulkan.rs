@@ -1,4 +1,5 @@
 use ash::{ext, khr, vk};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ffi::{CStr, c_char};
 
 const APP_NAME: &CStr = c"VULKAN-SANDBOX";
@@ -20,9 +21,8 @@ pub struct Context {
 
 impl Context {
     pub fn new(window: &winit::window::Window) -> Self {
-        let window_handles = WindowHandles::new(window).expect("Window handles Error");
-        let instance = Instance::new(&window_handles).expect("Instance Error");
-        let surface = Surface::new(&instance, window, window_handles).expect("Surface Error");
+        let instance = Instance::new(window).expect("Instance Error");
+        let surface = Surface::new(&instance, window).expect("Surface Error");
         let device = Device::new(&instance, &surface).expect("Device Error");
         let swapchain =
             Swapchain::new(&instance, &device, &surface, window).expect("Swapchain Error");
@@ -33,60 +33,6 @@ impl Context {
             device,
             swapchain,
         }
-    }
-}
-
-pub struct WindowHandles {
-    display: raw_window_handle::RawDisplayHandle,
-    window: raw_window_handle::RawWindowHandle,
-}
-
-impl WindowHandles {
-    fn new(window: &winit::window::Window) -> Result<Self, raw_window_handle::HandleError> {
-        use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-        let display = window.display_handle()?.as_raw();
-        let window = window.window_handle()?.as_raw();
-
-        Ok(Self { window, display })
-    }
-}
-
-pub struct Surface {
-    surface: vk::SurfaceKHR,
-    handles: WindowHandles,
-    loader: khr::surface::Instance,
-}
-
-impl Drop for Surface {
-    fn drop(&mut self) {
-        unsafe {
-            self.loader.destroy_surface(self.surface, None);
-        }
-    }
-}
-
-impl Surface {
-    fn new(
-        instance: &Instance,
-        window: &winit::window::Window,
-        handles: WindowHandles,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let loader = khr::surface::Instance::new(&instance.entry, &instance.instance);
-        let surface = unsafe {
-            ash_window::create_surface(
-                &instance.entry,
-                &instance.instance,
-                handles.display,
-                handles.window,
-                None,
-            )
-        }?;
-
-        Ok(Self {
-            surface,
-            handles,
-            loader,
-        })
     }
 }
 
@@ -104,13 +50,16 @@ impl Drop for Instance {
 }
 
 impl Instance {
-    pub fn new(window_handle: &WindowHandles) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(window: &winit::window::Window) -> Result<Self, Box<dyn std::error::Error>> {
         let entry = unsafe { ash::Entry::load()? };
 
         // Create extensions vector
         let mut extension_names: Vec<*const i8> = Vec::from(INSTANCE_EXTENSIONS);
+
+        use raw_window_handle::HasDisplayHandle;
         extension_names.append(
-            &mut ash_window::enumerate_required_extensions(window_handle.display)?.to_vec(),
+            &mut ash_window::enumerate_required_extensions(window.display_handle()?.as_raw())?
+                .to_vec(),
         );
 
         // Add platform-specific surface extensions
@@ -158,6 +107,50 @@ impl Instance {
         let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
 
         Ok(Self { entry, instance })
+    }
+}
+
+pub struct Surface {
+    surface: vk::SurfaceKHR,
+    loader: khr::surface::Instance,
+
+    window_handle: raw_window_handle::RawWindowHandle,
+    display_handle: raw_window_handle::RawDisplayHandle,
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe {
+            self.loader.destroy_surface(self.surface, None);
+        }
+    }
+}
+
+impl Surface {
+    fn new(
+        instance: &Instance,
+        window: &winit::window::Window,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let window_handle = window.window_handle()?.as_raw();
+        let display_handle = window.display_handle()?.as_raw();
+
+        let loader = khr::surface::Instance::new(&instance.entry, &instance.instance);
+        let surface = unsafe {
+            ash_window::create_surface(
+                &instance.entry,
+                &instance.instance,
+                display_handle,
+                window_handle,
+                None,
+            )
+        }?;
+
+        Ok(Self {
+            surface,
+            loader,
+            window_handle,
+            display_handle,
+        })
     }
 }
 
