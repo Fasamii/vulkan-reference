@@ -10,7 +10,9 @@ const INSTANCE_LAYERS: &[*const c_char] = &[
     // c"VK_LAYER_LUNARG_api_dump".as_ptr() as *const c_char,
 ];
 const INSTANCE_EXTENSIONS: &[*const c_char] = &[];
-const DEVICE_EXTENSIONS: &[*const c_char] = &[khr::swapchain::NAME.as_ptr() as *const c_char];
+const DEVICE_EXTENSIONS: &[*const c_char] = &[
+    khr::swapchain::NAME.as_ptr() as *const c_char, // For swapchain support
+];
 
 pub struct Context {
     instance: Instance,
@@ -320,12 +322,14 @@ impl Swapchain {
                 .get_physical_device_surface_capabilities(device.physical_device, surface.surface)?
         };
 
+        // Query color formats supported by surface
         let surface_formats = unsafe {
             surface
                 .loader
                 .get_physical_device_surface_formats(device.physical_device, surface.surface)?
         };
 
+        // Query supported presentation modes
         let present_modes = unsafe {
             surface.loader.get_physical_device_surface_present_modes(
                 device.physical_device,
@@ -336,25 +340,29 @@ impl Swapchain {
         // Choose surface format
         let format = surface_formats
             .iter()
-            .find(|f| {
+            .find(|&f| {
                 f.format == vk::Format::B8G8R8A8_SRGB
                     && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
             .copied()
-            .unwrap_or(surface_formats[0]);
+            .unwrap_or_else(|| panic!("Not supported format found"));
 
         // Choose present mode (prefer mailbox for lower latency)
         let present_mode = present_modes
             .iter()
             .cloned()
             .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
+            // FIFO is guaranteed on all GPUs
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
         // Choose extent
         let extent = if surface_capabilities.current_extent.width != u32::MAX {
+            // the extent is defined by windowing system
             surface_capabilities.current_extent
         } else {
+            // Get size from the winit
             let size = window.inner_size();
+            // Create extent clamped to surface capabilities
             vk::Extent2D {
                 width: size.width.clamp(
                     surface_capabilities.min_image_extent.width,
@@ -367,6 +375,7 @@ impl Swapchain {
             }
         };
 
+        // TODO: Make that cleaner
         let image_count = surface_capabilities.min_image_count + 1;
         let image_count = if surface_capabilities.max_image_count > 0 {
             image_count.min(surface_capabilities.max_image_count)
@@ -374,20 +383,21 @@ impl Swapchain {
             image_count
         };
 
-        let queue_family_indices = [
+        // let (image_sharing_mode, queue_family_index_count, p_queue_family_indices) =
+        //     if device.graphics_queue_family_idx != device.present_queue_family_idx {
+        //         (
+        //             vk::SharingMode::CONCURRENT,
+        //             2,
+        //             queue_family_indices.as_ptr(),
+        //         )
+        //     } else {
+        //         (vk::SharingMode::EXCLUSIVE, 0, std::ptr::null())
+        //     };
+
+        let queue_family_indices = &[
             device.graphics_queue_family_idx,
             device.present_queue_family_idx,
         ];
-        let (image_sharing_mode, queue_family_index_count, p_queue_family_indices) =
-            if device.graphics_queue_family_idx != device.present_queue_family_idx {
-                (
-                    vk::SharingMode::CONCURRENT,
-                    2,
-                    queue_family_indices.as_ptr(),
-                )
-            } else {
-                (vk::SharingMode::EXCLUSIVE, 0, std::ptr::null())
-            };
 
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.surface)
@@ -397,13 +407,9 @@ impl Swapchain {
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(image_sharing_mode)
-            .queue_family_indices(unsafe {
-                std::slice::from_raw_parts(
-                    p_queue_family_indices,
-                    queue_family_index_count as usize,
-                )
-            })
+            // Less performance but simpler
+            .image_sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(queue_family_indices)
             .pre_transform(surface_capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
