@@ -1,153 +1,92 @@
-use ash::{ext, khr, vk};
-use std::{
-    ffi::{CStr, c_char},
-    ptr::fn_addr_eq,
-};
-use winit::platform::wayland::WindowAttributesExtWayland;
+#![allow(unused)]
 
-const APP_NAME: &CStr = c"VULKAN-REFERENCE";
-const ENGINE_NAME: &CStr = c"NO ENGINE";
-const INSTANCE_LAYERS: &[*const c_char] = &[
-    c"VK_LAYER_KHRONOS_validation".as_ptr() as *const c_char,
-    // c"VK_LAYER_LUNARG_monitor".as_ptr() as *const c_char,
-    // c"VK_LAYER_LUNARG_api_dump".as_ptr() as *const c_char,
-    khr::swapchain::NAME.as_ptr() as *const c_char,
-];
-const INSTANCE_EXTENSIONS: &[*const c_char] = &[ext::debug_utils::NAME.as_ptr() as *const c_char];
+mod vulkan;
 
-#[allow(unused)]
-struct VulkanBase {
-    entry: ash::Entry,
-    instance: ash::Instance,
-    physical_device: vk::PhysicalDevice,
-    graphics_queue_idx: usize,
-    device: ash::Device,
-    queue: vk::Queue,
-}
-
-impl Drop for VulkanBase {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.device.device_wait_idle();
-            self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
-        }
-    }
-}
-
-impl VulkanBase {
-    pub fn new(surface: vk::SurfaceKHR) -> Result<Self, Box<dyn std::error::Error>> {
-        let entry = unsafe { ash::Entry::load()? };
-
-        // Checking if all layers are available
-        let available_layers = unsafe { entry.enumerate_instance_layer_properties()? };
-        for &layer_ptr in INSTANCE_LAYERS {
-            let layer_name = unsafe { CStr::from_ptr(layer_ptr) };
-            let found = available_layers.iter().any(|prop| {
-                let prop_name = unsafe { CStr::from_ptr(prop.layer_name.as_ptr()) };
-                prop_name == layer_name
-            });
-
-            if !found {
-                panic!("Layer {layer_name:?} not supported");
-            }
-        }
-
-        let application_info = vk::ApplicationInfo::default()
-            .application_name(APP_NAME)
-            .engine_name(ENGINE_NAME)
-            .api_version(vk::API_VERSION_1_3);
-
-        let instance_create_info = vk::InstanceCreateInfo::default()
-            .application_info(&application_info)
-            .enabled_layer_names(INSTANCE_LAYERS)
-            .enabled_extension_names(INSTANCE_EXTENSIONS);
-
-        let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
-
-        let physical_devices = unsafe { instance.enumerate_physical_devices()? };
-
-        // Select first graphics device
-        let physical_device = physical_devices
-            .into_iter()
-            .nth(0)
-            .ok_or("No vulkan physical devices found")?;
-
-        // Find graphics queue
-        let graphics_queue_idx =
-            unsafe { instance.get_physical_device_queue_family_properties(physical_device) }
-                .iter()
-                .enumerate()
-                .find_map(|(idx, prop)| {
-                    let supports_graphics = prop.queue_flags.contains(vk::QueueFlags::GRAPHICS);
-                    if supports_graphics { Some(idx) } else { None }
-                })
-                .ok_or("No GRAPHICS queue on device")?;
-
-        let device_queue_create_info = [vk::DeviceQueueCreateInfo::default()
-            .queue_priorities(&[1f32])
-            .queue_family_index(graphics_queue_idx as u32)];
-
-        let device_create_info =
-            vk::DeviceCreateInfo::default().queue_create_infos(&device_queue_create_info);
-
-        let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
-
-        let queue = unsafe { device.get_device_queue(graphics_queue_idx as u32, 0) };
-
-        Ok(Self {
-            entry,
-            instance,
-            physical_device,
-            graphics_queue_idx,
-            device,
-            queue,
-        })
-    }
-}
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::window::{self, Window, WindowId};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = winit::event_loop::EventLoop::new()?;
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    let mut handle = Handle { application: None };
-    event_loop.run_app(&mut handle)?;
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = App::new();
+    event_loop.run_app(&mut app)?;
+
     Ok(())
 }
 
 struct App {
-    window: winit::window::Window,
-    vulkan: VulkanBase,
+    context: Option<vulkan::Context>,
+    window: Option<Window>,
 }
 
-struct Handle {
-    application: Option<App>,
-}
-
-impl winit::application::ApplicationHandler for Handle {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        if self.application.is_none() {
-            let window = event_loop
-                .create_window(winit::window::WindowAttributes::default())
-                .expect("Failed to create window");
-
-            let vulkan = VulkanBase::new(todo!()).expect("Failed to create vulkan context");
-
-            let app = App { window, vulkan };
-
-            self.application = Some(app);
+impl App {
+    fn new() -> Self {
+        Self {
+            context: None,
+            window: None,
         }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        match (&self.window, &self.context) {
+            (None, None) => {
+                let window = event_loop
+                    .create_window(winit::window::WindowAttributes::default())
+                    .expect("Failed to create window");
+
+                let context = vulkan::Context::new(&window);
+
+                self.window = Some(window);
+                self.context = Some(context);
+            }
+            (None, Some(_)) => {
+                panic!(
+                    "Vulkan context without window you should probably create both (treat it as both are None)"
+                );
+                self.window = Some(
+                    event_loop
+                        .create_window(winit::window::WindowAttributes::default())
+                        .expect("Failed to create window"),
+                )
+            }
+            (Some(window), None) => {
+                self.context = Some(vulkan::Context::new(window));
+            }
+
+            (Some(_), Some(_)) => (),
+        };
+
+        println!("Resumed - Success");
     }
 
     fn window_event(
         &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
-        event: winit::event::WindowEvent,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
     ) {
         match event {
-            winit::event::WindowEvent::CloseRequested => println!("Close requested"),
-            winit::event::WindowEvent::RedrawRequested => println!("Redraw requeste"),
-            _ => (),
+            WindowEvent::CloseRequested => {
+                println!("Close - requirested");
+                event_loop.exit();
+            }
+
+            WindowEvent::RedrawRequested => {
+                println!("Redraw - requirested");
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Resized(_new_size) => {
+                // Handle window resize - recreate swapchain
+                println!("Window resized - need to recreate swapchain");
+            }
+            _ => {}
         }
     }
 }
